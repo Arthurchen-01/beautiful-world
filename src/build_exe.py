@@ -57,6 +57,8 @@ OCR_REQUIRED = ["OCR.dll", "XYLib.dll", "HPSocket4C.dll", "vcomp140.dll",
 HIDDEN = [
     "wm_scan", "wmcaptcha", "netguard", "proxy_pool", "ocr_service",
     "servers", "egress_guard", "solve_pick_text", "app_config", "wincompat",
+    "webui",                      # ★ 网页控制台（--web 模式）
+    "http.server", "http.cookies", "socketserver", "email.utils",
     "socks", "sockshandler",
     "Crypto", "Crypto.Cipher", "Crypto.Cipher.AES", "Crypto.Cipher.PKCS1_v1_5",
     "Crypto.Util", "Crypto.Util.Padding", "Crypto.PublicKey", "Crypto.PublicKey.RSA",

@@ -3,6 +3,114 @@
 本项目所有值得记录的变更都写在这里。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.5.0] - 2026-09-24
+
+> 版本跨度：**1.4.0 → 1.5.0**
+> 基线提交：`01fbb71`（tag `v1.4.0`）→ 本次
+> 代码量：`git diff --numstat v1.4.0 HEAD`（**不含本文件自身**）→ **7 个文件，`+1277 / −3`**
+> 性质：**新增网页端控制面板** —— 从「只能远程桌面操作」变成「浏览器就能管」
+
+### 起因
+
+客户要求：**「帮我把服务器接到网站上，相当于软件的网页端，这样有任何问题都能修。」**
+
+顺带问了一个架构问题：**用 IP 还是用域名？**
+
+### 结论：用域名（并配 Cloudflare Tunnel）
+
+| 理由 | 说明 |
+| :--- | :--- |
+| **HTTPS 是硬需求** | 面板要传几万个账号的明文密码、代理凭据。**纯 IP 拿不到 Let's Encrypt 证书**，只能明文 HTTP |
+| **换服务器不用改** | 这次已经吃过苦（服务器重装、IP 可能变）。域名只改一条 DNS |
+| **这个 IP 很敏感** | 它要去撞完美世界，不该被摆到全世界的扫描器面前 |
+| **Tunnel 让服务器零入站端口** | 不开 80/443，真实 IP 完全隐藏，还能加 Cloudflare Access 做第二层认证 |
+
+### 本次改动的文件 —— 改了什么
+
+| 文件 | 类型 | 改动行数 | 改了什么 |
+| :--- | :--- | ---: | :--- |
+| `src/webui.py` | **新** | +1046 | 网页面板：HTTP 服务 + 路由 + 认证 + 扫描管理 + 内嵌前端（零第三方依赖） |
+| `docs/网页面板_Cloudflare接入.md` | **新** | +165 | Cloudflare Tunnel 接入步骤、第二层认证、服务化配置、安全清单 |
+| `.gitignore` | 改 | +14 | ★★ **补上中文名的账号/代理文件 + 面板运行时数据**（见下「差点泄漏」） |
+| `src/wm_gui.py` | 改 | +16 / −1 | 新增 `--web` 入口（放在 tkinter 导入之前） |
+| `src/build_exe.py` | 改 | +2 | 把 `webui` 和 `http.server` 等加进 hidden imports |
+| `README.md` | 改 | +33 / −1 | 版本号 → v1.5.0；新增「网页控制台」整节 + 为什么不用 IP |
+| `VERSION` | 改 | +1 / −1 | `1.4.0` → `1.5.0` |
+| `CHANGELOG.md` | 改 | 本节 | — |
+
+### Added
+
+- **`--web` 模式**：`wmscan.exe --web --port 8080 --bind 127.0.0.1`
+  —— 面板直接打进现有 exe，**不另起程序、不引入任何第三方依赖**（只用标准库）
+- **面板功能（一次做到完整）**：
+
+  | 标签 | 功能 |
+  | :--- | :--- |
+  | 概览 | 服务器状态 / OCR 服务（可拉起、可停止）/ 计划任务 / 输入文件行数 |
+  | 扫描 | 参数设置 → 启停 → **实时日志（按文件偏移轮询增量）** → 结果预览 → 下载 |
+  | 历史 | 每批次开始/结束时间、退出码、结果行数、预览、下载 |
+  | 代理池 | 编辑代理文件 → 一键体检（可用数 / 唯一 IP / **国内出口告警** / 逐条延迟） |
+  | 设置 | 账号文件编辑 / 面板账号增删 / 改密码 |
+
+- **登录认证**：团队多人账号，PBKDF2-SHA256（20 万轮）存哈希，
+  会话用随机 token + HttpOnly/SameSite Cookie，7 天滑动过期，错密码延迟 0.6 秒防爆破
+
+### ★★ 差点把凭据推上 GitHub（重要教训）
+
+写 CHANGELOG 前按惯例 `git status` 复核，发现暂存区里有：
+
+```
+src/账号.txt              ← 6 个真账号的明文密码
+src/代理.txt              ← 101 条 arxlabs 代理凭据
+src/webui/users.json      ← 面板账号哈希
+src/webui/初始密码.txt     ← 面板明文密码
+```
+
+**根因**：`.gitignore` 里只排了 **ASCII 名**（`accounts*.txt` / `proxies.txt`），
+**中文名（`账号*.txt` / `代理*.txt`）漏了**；面板的运行时数据是这次新增的，也没排。
+
+**已修**：补上中文名模式 + 面板运行时数据，并写了一个脱敏检查脚本
+（扫描暂存 diff 的每一行新增内容，找凭据特征，排除占位符）。
+
+> **教训：`.gitignore` 排的是名字，不是「这类文件」。**
+> 换了个语言/命名习惯的文件名，就漏了。**推之前必须扫一遍实际 diff。**
+
+### Verified
+
+**面板在服务器上跑通**（`C:\WMRoleScan`，`--bind 127.0.0.1`）：
+
+```
+GET /api/ping      {"ok": true, "need_login": true}
+GET /              HTTP 200  14855 字节（面板页面）
+POST /api/login    {"ok": true, "user": "admin"}
+GET /api/status    {"host": "ser047696508519", "disk": {"free_gb": 89.5, "total_gb": 100.0},
+                    "ocr": {"listening": true, "processes": 1}}
+GET /api/tasks     [WMRoleScan Ready, WMRoleScan-OCR Ready, WMRoleScan-Web Running]
+GET /api/accounts  6 个真账号
+GET /api/proxies   101 条 arxlabs 代理
+```
+
+**安全设计验证**：从外部连服务器 8080 → **连不上**（面板只监听 `127.0.0.1`）。
+这正是要的效果 —— 只能经 Cloudflare Tunnel 或本机访问。
+
+**服务化**：注册了计划任务 `WMRoleScan-Web`
+（`SYSTEM` 身份 + `RestartCount 999` + `ExecutionTimeLimit 0` = 挂了自动拉起、永不超时杀掉）。
+
+### Fixed
+
+| 症状 | 根因 |
+| :--- | :--- |
+| 面板接口 500 / 连接被掐断 | `JOB.start_at` 是字符串，但 `elapsed` 拿它做减法 → `TypeError`。改用数值时间戳 |
+| 中文名凭据文件会被推上 GitHub | `.gitignore` 只排了 ASCII 名 |
+
+### Known Issues
+
+| 问题 | 状态 |
+| :--- | :--- |
+| **Cloudflare Tunnel 未接** | ⚠️ 等用户提供 tunnel token（需在 Cloudflare 控制台创建隧道） |
+| 面板在 exe 里的体积 | ⚠️ 内嵌 HTML，约 15KB，可忽略 |
+| 并发扫描数受代理商限制 | ⚠️ 见 [1.3.1] 的产能实测 |
+
 ## [1.4.0] - 2026-09-24
 
 > 版本跨度：**1.3.1 → 1.4.0**

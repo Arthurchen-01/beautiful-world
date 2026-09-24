@@ -6,6 +6,13 @@ accounts*.txt
 real_accounts.txt
 real_out*.txt
 result*.txt
+# ★★ 中文名的输入文件 —— 这里面是真实账号密码和代理凭据，绝不能入库。
+#    （上面只排了 ASCII 名，中文名漏了；实测差点把 6 个真账号和 101 条
+#      代理凭据推上 GitHub，是靠 `git status` 复核才拦住的。）
+账号*.txt
+代理*.txt
+!账号.txt.example
+!代理.txt.example
 config.json
 *.log
 crash.log
@@ -25,6 +32,13 @@ ui_debug.txt
 API代理_已处理.txt
 代理_已处理.txt
 账号_已处理.txt
+
+# ★★ 网页面板的运行时数据 —— 账号哈希 / 会话 / 初始密码，绝不入库
+#   注意：带斜杠的模式会被锚定到仓库根，所以必须写成 src/webui/xxx
+src/webui/users.json
+src/webui/sessions.json
+src/webui/history.jsonl
+src/webui/初始密码.txt
 server_*.py
 # ↑ 这条是排掉临时的服务器诊断脚本；但 tools/ 下的是正式工具，要放行
 !tools/server_ready.py

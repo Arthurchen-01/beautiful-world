@@ -30,7 +30,7 @@ import time
 # 是**没验证过**的。兜底做法：在**用户会话**里用 --ocr-start 把服务常驻起来，
 # 之后 Session 0 里的扫描任务一连 506 就发现已经在监听，
 # ocr_service.start() 会直接返回、根本不碰窗口，坑就绕过去了。
-if len(sys.argv) > 1 and sys.argv[1] in ("--ocr-start", "--ocr-stop"):
+if len(sys.argv) > 1 and sys.argv[1] in ("--ocr-start", "--ocr-stop", "--web"):
     _here0 = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
               else os.path.dirname(os.path.abspath(__file__)))
     sys.path.insert(0, _here0)
@@ -38,6 +38,21 @@ if len(sys.argv) > 1 and sys.argv[1] in ("--ocr-start", "--ocr-stop"):
         sys.path.insert(0, getattr(sys, "_MEIPASS", _here0))
     except Exception:
         pass
+
+    # ---- ★ 网页控制台（--web）----
+    # 同样放在 tkinter 之前：服务器上可能压根没有图形界面库，
+    # 而面板只需要标准库，不该被 tkinter 拖累。
+    if sys.argv[1] == "--web":
+        try:
+            import webui
+            sys.exit(webui.main(sys.argv[2:]))
+        except Exception as _e:
+            import traceback
+            try:
+                print("网页面板启动失败: %s\n%s" % (_e, traceback.format_exc()))
+            except Exception:
+                pass
+            sys.exit(1)
 
     def _ocr_task_main():
         import app_config
