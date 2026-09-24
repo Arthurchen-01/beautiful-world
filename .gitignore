@@ -26,6 +26,8 @@ API代理_已处理.txt
 代理_已处理.txt
 账号_已处理.txt
 server_*.py
+# ↑ 这条是排掉临时的服务器诊断脚本；但 tools/ 下的是正式工具，要放行
+!tools/server_ready.py
 diag_*.py
 test_*.py
 patch_*.py
