@@ -78,12 +78,34 @@ DEFAULT_OUT = os.path.join(os.path.dirname(HERE), "proxies_local.txt")
 
 BUFSIZE = 65536
 
+# ---- 日志：既打控制台，也写文件 ----------------------------------------
+# ★ 为什么要写文件：用 Start-Process 起的子进程会挂在父进程的 job object 上，
+#   父进程一被强杀，子进程跟着没了（日志也一起丢）。所以桥接器要能自己落盘，
+#   这样即使被扔到后台、脱离终端，也能事后查它到底干了什么。
+_LOG_FP = None
+
+
+def set_log(path):
+    global _LOG_FP
+    if not path:
+        return
+    try:
+        _LOG_FP = open(path, "a", encoding="utf-8", errors="replace", buffering=1)
+    except Exception:
+        _LOG_FP = None
+
 
 def say(*a):
+    msg = " ".join(str(x) for x in a)
     try:
-        print(*a, flush=True)
+        print(msg, flush=True)
     except Exception:
         pass
+    if _LOG_FP is not None:
+        try:
+            _LOG_FP.write(msg + "\n")
+        except Exception:
+            pass
 
 
 # ------------------------------------------------------------------ 基础 IO
@@ -274,29 +296,60 @@ def parse_line(line):
             "local_port": None, "ip": None, "geo": None, "ok": None, "ms": None}
 
 
-def probe(local_port, timeout=25):
-    """经本地端口查出口 IP + 归属地"""
-    t0 = time.time()
+def _http_get_via(local_port, host, port, path, timeout=25):
+    """经本地端口发一个最小 HTTP GET，返回响应体字符串"""
     s = socket.create_connection(("127.0.0.1", local_port), timeout=timeout)
-    socks5_connect(s, "", "", "ipinfo.io", 80, timeout)
-    s.sendall(b"GET /json HTTP/1.1\r\nHost: ipinfo.io\r\n"
-              b"User-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n")
-    buf = b""
-    s.settimeout(timeout)
     try:
-        while True:
-            d = s.recv(4096)
-            if not d:
-                break
-            buf += d
-    except Exception:
-        pass
-    s.close()
-    body = buf.decode("latin1", "replace").split("\r\n\r\n")[-1]
-    d = json.loads(body)
-    return {"ip": d.get("ip"), "cc": d.get("country"),
-            "geo": "%s/%s" % (d.get("city"), d.get("org", "")[:28]),
-            "ms": round((time.time() - t0) * 1000)}
+        socks5_connect(s, "", "", host, port, timeout)
+        s.sendall(("GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: Mozilla/5.0\r\n"
+                   "Connection: close\r\n\r\n" % (path, host)).encode())
+        buf = b""
+        s.settimeout(timeout)
+        try:
+            while True:
+                d = s.recv(4096)
+                if not d:
+                    break
+                buf += d
+        except Exception:
+            pass
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+    return buf.decode("latin1", "replace").split("\r\n\r\n", 1)[-1]
+
+
+def probe(local_port, timeout=25, attempts=3):
+    """经本地端口查出口 IP + 归属地。
+
+    ★ 必须重试：101 条并发打 ipinfo.io 会被限流，返回非 JSON。
+      早期版本没重试，直接把 7 条**好代理**误判成"不可用"。
+      现在先拿 api.ipify.org 的纯文本 IP（不会被 JSON 解析坑），再补归属地。
+    """
+    t0 = time.time()
+    last = None
+    for i in range(attempts):
+        try:
+            ip = _http_get_via(local_port, "api.ipify.org", 80, "/", timeout).strip()
+            if not ip or len(ip) > 46 or " " in ip:
+                raise ValueError("ipify 返回异常: %r" % ip[:60])
+            cc, geo = None, ""
+            try:
+                j = json.loads(_http_get_via(local_port, "ipinfo.io", 80,
+                                             "/%s/json" % ip, timeout))
+                cc = j.get("country")
+                geo = "%s/%s" % (j.get("city") or "?", (j.get("org") or "")[:26])
+            except Exception:
+                geo = "(归属地查询失败，IP 已确认为真)"
+            return {"ip": ip, "cc": cc, "geo": geo,
+                    "ms": round((time.time() - t0) * 1000)}
+        except Exception as ex:
+            last = ex
+            if i < attempts - 1:
+                time.sleep(1.5)
+    raise last if last else RuntimeError("probe failed")
 
 
 # ------------------------------------------------------------------ 主流程
@@ -309,7 +362,15 @@ def main():
     ap.add_argument("--check", dest="check", action="store_true", default=True)
     ap.add_argument("--no-check", dest="check", action="store_false")
     ap.add_argument("--only", type=int, default=0)
+    ap.add_argument("--log", default="", help="把日志同时写到这个文件（后台跑时用）")
+    ap.add_argument("--check-only", action="store_true",
+                    help="只做体检并写出可用清单，不常驻（跑完就退出）")
     args = ap.parse_args()
+
+    set_log(args.log)
+    if args.log:
+        say("")
+        say("---- 启动 %s  pid=%d ----" % (time.strftime("%Y-%m-%d %H:%M:%S"), os.getpid()))
 
     if args.first_hop in ("none", "-", ""):
         first_hop = None
@@ -395,6 +456,11 @@ def main():
     else:
         say("")
         say("★ 没有可用代理，未写出输出文件。")
+
+    if args.check_only:
+        say("")
+        say("--check-only：体检完成，退出。")
+        return 0 if good else 1
 
     say("")
     say("桥接器运行中（Ctrl+C 退出）...")
