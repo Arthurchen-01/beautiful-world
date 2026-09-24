@@ -1379,9 +1379,21 @@ def run_selftest():
         import egress_guard
         try:
             tb = egress_guard.check_tunnel_binding(verbose=False)
+            if tb.get("skipped"):
+                out("    （没有代理文件，隧道绑定自查跳过 —— 不是出错，"
+                    "配了代理文件就会查）")
             for r in tb["results"]:
-                out(f"    {r['target']} → {r.get('local_ip')} "
-                    + ("隧道内" if r.get("in_tunnel") else "!! 裸奔"))
+                # ★ 三态，别用二态：local_ip=None 表示"根本没连上"（比如域名解析不了），
+                #   这时候报"裸奔"是**反的** —— 什么都没连，哪来的泄漏。
+                #   之前这里就因此把 `us.proxy.example`（脱敏占位符）报成"!! 裸奔"，
+                #   自检看起来像出事了，其实是噪声。
+                if r.get("local_ip") is None:
+                    mark = "跳过(连不上，非裸奔)"
+                elif r.get("in_tunnel"):
+                    mark = "隧道内"
+                else:
+                    mark = "!! 裸奔(物理网卡)"
+                out(f"    {r['target']} → {r.get('local_ip')} {mark}")
             if not tb["ok"]:
                 rc = 1
             info = egress_guard.preflight(verbose=False, check_tunnel=False)

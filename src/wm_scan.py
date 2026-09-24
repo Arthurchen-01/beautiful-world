@@ -128,7 +128,7 @@ def get(sess, url, tries=3, **kw):
     last = None
     for a in range(tries):
         try:
-            return sess.get(url, proxies=_px(), timeout=30, **kw)
+            return sess.get(url, proxies=_px(), timeout=HTTP_TIMEOUT, **kw)
         except Exception as e:
             last = e
             time.sleep(1.5 + a * 2)
@@ -139,7 +139,7 @@ def post(sess, url, **kw):
     last = None
     for a in range(3):
         try:
-            return sess.post(url, proxies=_px(), timeout=40, **kw)
+            return sess.post(url, proxies=_px(), timeout=POST_TIMEOUT, **kw)
         except Exception as e:
             last = e
             time.sleep(1.5 + a * 2)
@@ -360,7 +360,7 @@ def _role_get(sess, game_id, server_id, tries=4):
     for a in range(tries):
         try:
             return sess.get(EP_ROLE, params=p, proxies=_px(),
-                            headers=ROLE_H, timeout=25)
+                            headers=ROLE_H, timeout=HTTP_TIMEOUT)
         except Exception as e:
             last = e
             if a < tries - 1:
@@ -553,6 +553,24 @@ def detect_games(sess, verbose=True):
     return games
 
 
+# ---------------------------------------------------------------- 超时
+#
+# ★ 为什么做成可配的：走日本住宅代理链时，验证码图片 CDN
+#   （captchas-1251008858.file.myqcloud.com，腾讯 COS）实测要 **5~14 秒**才下完
+#   一张 26KB 的图；并发一高就超过 30 秒，`requests` 抛 ReadTimeout，
+#   整个账号被判 INCOMPLETE 重跑。
+#
+#   实测（2026-09-24，经 chain_proxy 桥接的 4 个不同出口）：
+#     出口 :20001  5273ms    :20002  6838ms
+#     出口 :20050 14226ms    :20100  5158ms
+#
+#   所以住宅代理场景建议 --timeout 60。命令行/环境变量都能改：
+#     WM_HTTP_TIMEOUT / WM_POST_TIMEOUT
+HTTP_TIMEOUT = float(os.environ.get("WM_HTTP_TIMEOUT", "30"))
+POST_TIMEOUT = float(os.environ.get("WM_POST_TIMEOUT", "") or
+                     max(HTTP_TIMEOUT + 10, 40))
+
+
 # ---------------------------------------------------------------- 指纹随机化
 _UAS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -688,15 +706,28 @@ def build_parser():
                     help="多 IP 代理池文件（host:port:user:pass 每行一条）；不传则用单出口")
     ap.add_argument("--proxy-check", type=int, default=10,
                     help="代理池体检并发数（默认10）")
+    ap.add_argument("--timeout", type=float, default=0,
+                    help="HTTP 超时秒数（默认 30；★ 走住宅代理链建议 60 —— "
+                         "验证码图片 CDN 实测要 5~14 秒）")
     return ap
 
 
 def run_scan(args):
     """真正干活。GUI 直接构造 args 命名空间调用它。"""
-    global _logf
+    global _logf, HTTP_TIMEOUT, POST_TIMEOUT
     STOP_EVENT.clear()
+
+    # ---- 0) 超时（命令行覆盖环境变量）----
+    # 走住宅代理链时默认 30 秒不够：验证码图片 CDN 实测要 5~14 秒，
+    # 并发一高就 ReadTimeout，账号被判 INCOMPLETE。
+    _to = float(getattr(args, "timeout", 0) or 0)
+    if _to > 0:
+        HTTP_TIMEOUT = _to
+        POST_TIMEOUT = max(_to + 10, 40)
+
     _logf = io.open(os.path.join(WORK_DIR, "scan.log"), "a", encoding="utf-8")
     log(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} 批次开始 =====")
+    log(f"[超时] HTTP={HTTP_TIMEOUT:.0f}s  POST={POST_TIMEOUT:.0f}s")
 
     # ---- 0a) ★ 出口红线：绝不暴露本机(昆明)IP ----
     if not args.no_egress_check:

@@ -112,12 +112,63 @@ def physical_ips():
     return ips
 
 
+def _hosts_from_proxy_file():
+    """从代理文件里取几个真实目标，给隧道绑定自查用。
+
+    ★ 原来 hosts 的默认值是 `us.proxy.example` —— 那是**脱敏占位符**，
+      根本解析不了。结果是自查每次都打印一行 `→ None !! 裸奔`，
+      把"没连上"误报成"裸奔"（恰好是反的），自检看起来像出事了。
+    """
+    import os as _os
+    cand = []
+    for p in (_os.environ.get("WM_PROXY_FILE", ""),
+              _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "proxies.txt"),
+              _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                            "..", "proxies.txt")):
+        if p and _os.path.exists(p):
+            cand.append(p)
+    for p in cand:
+        out = []
+        try:
+            with open(p, "r", encoding="utf-8-sig", errors="replace") as f:
+                for ln in f:
+                    ln = ln.strip()
+                    if not ln or ln.startswith("#"):
+                        continue
+                    parts = ln.split(":")
+                    if len(parts) < 2:
+                        continue
+                    h, pt = parts[0], parts[1]
+                    if h in ("127.0.0.1", "localhost"):
+                        continue          # 本地桥接端口，查不出隧道归属
+                    if pt.isdigit():
+                        hp = (h, int(pt))
+                        if hp not in out:          # 去重：代理池里同一个域名会重复上百次
+                            out.append(hp)
+                    if len(out) >= 3:
+                        break
+        except Exception:
+            continue
+        if out:
+            return out
+    return None
+
+
 def check_tunnel_binding(hosts=None, verbose=True):
     """★ 最硬的自查：我们自己的出站连接到底绑在哪个地址上？
 
     返回 {"ok": bool, "results": [...], "physical_ips": [...], "tunnel_cidrs": [...]}
     """
-    hosts = hosts or [("us.proxy.example", 3010)]
+    if hosts is None:
+        hosts = _hosts_from_proxy_file()
+        if not hosts:
+            # 没有真实代理文件 —— 明说"跳过"，别拿占位符假装查过了
+            if verbose:
+                _safe_print("[tunnel] 没有代理文件，隧道绑定自查跳过"
+                            "（设 WM_PROXY_FILE 或放一个 proxies.txt 就能查）")
+            return {"ok": True, "results": [], "skipped": True,
+                    "physical_ips": sorted(physical_ips()),
+                    "tunnel_cidrs": TUNNEL_CIDRS}
     res, bad = [], []
     phys = physical_ips()
     for h, p in hosts:

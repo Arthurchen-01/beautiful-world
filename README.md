@@ -5,7 +5,7 @@
 输入一批「账号 + 密码」，自动登录完美世界，查出每个账号在哪些区服有角色、
 角色多少级，输出成一张表。
 
-**版本：v1.0.2** ｜ Windows 单文件 exe ｜ 内置 OCR 识别引擎
+**版本：v1.1.0** ｜ Windows 单文件 exe ｜ 内置 OCR 识别引擎
 
 ---
 
@@ -68,6 +68,7 @@ beautiful-world/
 │   ├── chain_proxy.py          ★ 代理池第一跳桥接（解决代理商拒大陆 IP）
 │   ├── tunnel.py               ★ 本地端口转发（RDP/WinRM/SMB）+ 权威探活
 │   ├── server_ready.py         ★ 服务器就绪监视（只认真协议回复）
+│   ├── deploy_server.ps1       ★ Windows 服务器一键部署（六段体检）
 │   ├── pick_text_linux.py      Linux 原生验证码求解器（研发中）
 │   └── proxy_check.py          代理批量体检
 ├── docs/                       文档
@@ -102,7 +103,32 @@ beautiful-world/
 | `--workers N` | 账号内区服并发数（默认 3） |
 | `--rate 0.8` | 请求最小间隔秒（实测 0.8 最优） |
 | `--retries N` | 网络类失败换代理重试次数 |
+| `--timeout N` | HTTP 超时秒数（默认 30）。**★ 走住宅代理链建议 60** —— 验证码图片 CDN 经日本住宅代理实测要 5~14 秒一张 |
 | `--fresh` | 忽略进度全部重跑 |
+
+> 不想加参数也行：设环境变量 `WM_HTTP_TIMEOUT=60`（`WM_POST_TIMEOUT` 自动取 `N+10`）。
+
+---
+
+## 部署到 Windows 服务器
+
+```powershell
+# 先干跑（只体检，不改任何东西）
+.\tools\deploy_server.ps1 -DryRun
+
+# 真部署：建目录 / 铺文件 / 生成定时运行脚本 / 注册计划任务 / 冒烟测试
+.\tools\deploy_server.ps1 `
+    -Exe      "C:\Users\Administrator\Desktop\完美世界扫号工具.exe" `
+    -Accounts "C:\Users\Administrator\Desktop\账号.txt" `
+    -Proxies  "C:\Users\Administrator\Desktop\代理.txt" `
+    -WorkDir  "C:\WMRoleScan" -IntervalMinutes 30
+```
+
+它会先查**这套 OCR 引擎活不活得下来**：Media Foundation、Direct3D 11、
+32 位 `vcomp140.dll`（缺了会崩 `0xC000041D`）、以及**是不是 Server Core**
+（Server Core 没有桌面，图形界面跑不了）。
+
+> 服务器**不需要显卡** —— Windows 自带 WARP 软件 D3D11 渲染器。
 
 ---
 

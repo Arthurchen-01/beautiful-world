@@ -44,6 +44,10 @@ verify_*.py
 build/
 dist/
 *.spec
+# 图标是 make_icon.py 的生成物（build_exe.py 会缺了就自动生成），不入库
+src/app.ico
+src/app_512.png
+src/app_preview.png
 __pycache__/
 *.pyc
 *.pyo

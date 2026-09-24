@@ -23,6 +23,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 OCR_HOST, OCR_PORT = "127.0.0.1", 506
 LOG = []
 
+# HTTP 超时（秒）—— 从环境变量读，默认 30。
+# ★ 走住宅代理链时 30 秒不够：验证码图片 CDN 实测要 5~14 秒才下完，
+#   并发一高就 ReadTimeout，账号被判 INCOMPLETE 重跑。
+HTTP_TIMEOUT = float(os.environ.get("WM_HTTP_TIMEOUT", "30"))
+
 
 def log(s=""):
     print(s, flush=True)
@@ -64,11 +69,15 @@ def cb():
 
 
 def get(sess, url, **kw):
-    """带 3 次重试的 GET（代理会抖）"""
+    """带 3 次重试的 GET（代理会抖）
+
+    超时从 WM_HTTP_TIMEOUT 读（默认 30）。走住宅代理链时要调大 ——
+    验证码图片 CDN（腾讯 COS）实测要 5~14 秒才下完一张 26KB 的图。
+    """
     last = None
     for a in range(3):
         try:
-            return sess.get(url, proxies=PROXIES, timeout=30, **kw)
+            return sess.get(url, proxies=PROXIES, timeout=HTTP_TIMEOUT, **kw)
         except Exception as e:
             last = e
             log(f"    (重试 {a+1}/3: {type(e).__name__})")
