@@ -223,13 +223,33 @@ def why_blocked(pid=None, timeout=5):
 
 
 # ================================================================ 3. 出口 IP
-def egress_info(timeout=15):
+def egress_info(timeout=15, proxies=None):
+    """查出口 IP 与归属。
+
+    ★ proxies 可传：服务器形态下要走代理池里的某一条，而不是本机默认出口。
+
+    ★★ 必须先把代理登记给 netguard！否则 netguard 会把我们传的代理
+       **覆盖**成默认的 `http://127.0.0.1:7890`（它的设计就是「非登记代理一律强制改写」）。
+       服务器上没有 7890，于是请求必然失败，而异常被下面吞掉，
+       表现成「取不到出口 IP」—— 极难查。实测踩过。
+    """
+    px = proxies if proxies is not None else PROXIES
+    try:
+        import netguard
+        if isinstance(px, dict):
+            for v in px.values():
+                if v:
+                    netguard.allow_proxy(v)
+    except Exception:
+        pass
+
     s = requests.Session()
     s.trust_env = False
     ip = None
+    last_err = None
     for url, tag in ECHO_ENDPOINTS:
         try:
-            r = s.get(url, proxies=PROXIES, headers={"User-Agent": UA}, timeout=timeout)
+            r = s.get(url, proxies=px, headers={"User-Agent": UA}, timeout=timeout)
             if tag == "ip-api":
                 d = r.json()
                 if d.get("status") == "success":
@@ -239,31 +259,141 @@ def egress_info(timeout=15):
             else:
                 ip = r.json().get("ip")
                 break
-        except Exception:
+        except Exception as e:
+            last_err = e
             continue
     if ip:
         try:
             r = s.get(f"http://ip-api.com/json/{ip}"
                       "?fields=status,country,countryCode,regionName,city,isp,query",
-                      proxies=PROXIES, headers={"User-Agent": UA}, timeout=timeout)
+                      proxies=px, headers={"User-Agent": UA}, timeout=timeout)
             d = r.json()
             if d.get("status") == "success":
                 return {"ip": d.get("query"), "country": d.get("countryCode"),
                         "country_name": d.get("country"), "region": d.get("regionName"),
                         "city": d.get("city"), "isp": d.get("isp"), "via": "ipify+ip-api"}
-        except Exception:
-            pass
+        except Exception as e:
+            last_err = e
         return {"ip": ip, "country": None, "country_name": None, "region": None,
                 "city": None, "isp": None, "via": "ipify"}
+    if last_err is not None:
+        _safe_print(f"[egress] 取出口失败，最后一次错误: "
+                    f"{type(last_err).__name__}: {str(last_err)[:120]}")
     return None
 
 
+# ================================================================ 部署形态判定
+def detect_deploy_mode(proxy_file=None):
+    """判断现在是哪种部署形态。
+
+    两种形态的**出口安全判据完全不同**：
+
+      A) 本机形态（现在的昆明机器）
+         本机挂 fake-ip 的 TUN + 本地代理 127.0.0.1:7890
+         判据：本地代理在跑 + 连接绑在隧道网段 + 出口不在国内
+
+      B) 服务器形态（香港那台）
+         服务器**能直连代理商**，直接用代理池文件，没有 TUN、没有本地代理
+         判据：代理文件有内容 + 代理池里每条出口都不在国内
+
+    ★ 早期版本只认 A，导致在服务器上跑必然报
+      「代理端口 http://127.0.0.1:7890 没在监听 —— 拒绝开工」而跑不起来。
+    """
+    import os as _os
+    cand = (proxy_file or _os.environ.get("WM_PROXY_FILE") or "")
+    if not cand:
+        # 看看 exe/脚本旁边有没有代理文件
+        here = _os.path.dirname(_os.path.abspath(__file__))
+        for n in ("proxies.txt", "代理.txt", "proxies_arx.txt"):
+            p = _os.path.join(here, n)
+            if not _os.path.exists(p):
+                p = _os.path.join(_os.path.dirname(here), n)
+            if _os.path.exists(p) and _os.path.getsize(p) > 10:
+                cand = p
+                break
+    if cand and _os.path.exists(cand) and _os.path.getsize(cand) > 10:
+        return "server", cand
+    return "local", None
+
+
+def first_proxy_of(proxy_file):
+    """从代理文件里取第一条，返回 requests 用的 proxies dict"""
+    import io as _io
+    with _io.open(proxy_file, encoding="utf-8-sig", errors="replace") as f:
+        for ln in f:
+            ln = ln.strip()
+            if not ln or ln.startswith("#"):
+                continue
+            p = ln.split(":")
+            if len(p) < 4:
+                continue
+            url = "socks5h://%s:%s@%s:%s" % (":".join(p[2:-1]), p[-1], p[0], p[1])
+            return {"http": url, "https": url}
+    return None
+
+
+
 # ================================================================ 总入口
-def preflight(verbose=True, allow_cn=False, retries=3, check_tunnel=True):
-    """开工前体检。不安全就 raise EgressUnsafe。返回出口信息 dict。"""
+def preflight(verbose=True, allow_cn=False, retries=3, check_tunnel=True,
+              proxy_file=None, mode=None):
+    """开工前体检。不安全就 raise EgressUnsafe。返回出口信息 dict。
+
+    ★ 支持两种部署形态（见 detect_deploy_mode）：
+        local  —— 本机挂 TUN + 本地代理，判据是「隧道 + 本地代理在跑」
+        server —— 服务器直连代理商，判据是「代理文件 + 出口不在国内」
+    """
     def say(s):
         if verbose:
             _safe_print(s)
+
+    if mode is None:
+        mode, auto_file = detect_deploy_mode(proxy_file)
+        proxy_file = proxy_file or auto_file
+
+    # ============================================================ 服务器形态
+    #
+    # 服务器（香港）能**直连代理商**，没有 TUN、也没有本地 7890 代理。
+    # 早期版本在这里强行要求「本地代理端口在监听」，导致服务器上必然跑不起来。
+    if mode == "server":
+        say(f"[egress] 部署形态：**服务器**（用代理池直连代理商，不要求本地代理端口）")
+        say(f"[egress] 代理文件：{proxy_file}")
+
+        px = first_proxy_of(proxy_file)
+        if not px:
+            raise EgressUnsafe(
+                f"代理文件里一条可用代理都没有：{proxy_file}\n"
+                "  拒绝开工 —— 没有代理就只剩裸连。")
+
+        # 出口归属（走代理池的第一条）
+        info = None
+        for i in range(retries):
+            info = egress_info(proxies=px)
+            if info and info.get("ip"):
+                break
+            say(f"[egress] 第 {i+1}/{retries} 次取出口失败，重试 ...")
+            time.sleep(2 + i * 2)
+        if not info or not info.get("ip"):
+            raise EgressUnsafe(
+                "取不到出口 IP（代理可能在抖）—— 拒绝开工。\n"
+                "  取不到就无法证明出口安全，按最坏情况处理。")
+
+        ip, cc = info["ip"], (info.get("country") or "").upper()
+        say(f"[egress] 出口 IP = {ip}")
+        say(f"[egress] 归属     = {info.get('country_name')} / {info.get('region')} / "
+            f"{info.get('city')} / {info.get('isp')}  ({cc})")
+        if not cc:
+            raise EgressUnsafe(f"出口 {ip} 的归属地查不到 —— 拒绝开工（无法排除是国内 IP）")
+        if cc in FORBIDDEN_COUNTRIES and not allow_cn:
+            raise EgressUnsafe(
+                f"★ 出口是国内 IP（{cc} {info.get('region')} {info.get('city')}）—— 已阻断！\n"
+                f"  这会把你的真实位置暴露给目标站。")
+
+        say("[egress] ✅ 服务器形态三项全过：代理文件有内容 / 取到出口 / 出口不在国内")
+        say("[egress]    （注意：代理池里**每一条**出口是否都在境外，由 proxy_pool 的红线再查一遍）")
+        return info
+
+    # ============================================================ 本机形态
+    say("[egress] 部署形态：**本机**（TUN + 本地代理）")
 
     # --- 0) EgressGuard 闸门状态（装了才看）---
     eg = egressguard_status()

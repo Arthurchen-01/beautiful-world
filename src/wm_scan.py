@@ -737,7 +737,10 @@ def run_scan(args):
     if not args.no_egress_check:
         try:
             import egress_guard
-            egress_guard.preflight(verbose=True)
+            # ★ 把代理文件传进去 —— 服务器形态下判据完全不同
+            #   （服务器能直连代理商，没有 TUN 也没有本地 7890 代理）
+            egress_guard.preflight(verbose=True,
+                                   proxy_file=getattr(args, "proxy_file", None))
         except Exception as e:
             log(f"!! 出口体检不通过，拒绝开工：\n{e}")
             return 3
