@@ -5,7 +5,7 @@
 输入一批「账号 + 密码」，自动登录完美世界，查出每个账号在哪些区服有角色、
 角色多少级，输出成一张表。
 
-**版本：v1.2.0** ｜ Windows 单文件 exe ｜ 内置 OCR 识别引擎
+**版本：v1.3.0** ｜ Windows 单文件 exe ｜ 内置 OCR 识别引擎
 
 ---
 
@@ -130,24 +130,48 @@ beautiful-world/
 
 > 服务器**不需要显卡** —— Windows 自带 WARP 软件 D3D11 渲染器。
 
-### ⚠️ 服务器上的两个坑（脚本已处理，但要知道）
+### ⚠️ 服务器上的三个坑（脚本已处理，但要知道）
 
 **坑 1：Server Core 跑不了。** 装系统时必须选「桌面体验」版。
 
-**坑 2：Session 0 没有桌面。** 这套 OCR 引擎是 GUI 程序，要靠窗口消息点「启动」按钮。
-计划任务用 `SYSTEM` 跑就在 Session 0 —— 那里没有交互桌面。
+**坑 2：★★★ Windows Defender 会删掉 OCR 的文件。**
 
-部署脚本的应对：
+Defender 把**易语言**编译的程序判为广告软件（`Adware:Win32/Flystudio`），
+PyInstaller 解包那一刻就删掉 `HPSocket4C.dll`（网络库）和 `OCR.dll`（54MB 模型）。
 
-- 第 2 步会打印当前会话和身份，是 Session 0 就明确警告
-- 第 6 步冒烟测试**实际把 OCR 拉起来**，过了才是真过了
-- **额外注册一个 `WMRoleScan-OCR` 任务**，在用户登录时（有桌面的会话）跑
-  `完美世界扫号工具.exe --ocr-start` 把服务常驻起来。
-  之后 Session 0 的主任务发现 506 已经在监听就**直接返回，根本不碰窗口**
+**后果极具误导性**：OCR 窗口能建出来、按钮能找到、`BM_CLICK` 返回 True，
+但**一点「启动」进程就崩**（内存 9MB，只加载 7 个系统 DLL）。
+**现象和「缺 vcomp140.dll」几乎一样。**
 
-> 手工拉一次：`完美世界扫号工具.exe --ocr-start`　停止：`--ocr-stop`
+**判据**：看崩溃前**加载了几个模块**。只加载 7 个系统 DLL = 依赖文件被删；
+加载了几十个 = 引擎初始化失败。
+
+部署脚本的 **2b 段**会自动加排除项。客户若有火绒/360/卡巴，也要在那边加白名单。
+
+**坑 3：32 位 VC++ 运行库。**
+
+新装的 Windows Server 默认不带 x86 运行库，而 `XYLib.dll` 是 32 位的：
+
+```powershell
+Invoke-WebRequest "https://aka.ms/vs/17/release/vc_redist.x86.exe" -OutFile "$env:TEMP\vc_redist.x86.exe" -UseBasicParsing
+Start-Process "$env:TEMP\vc_redist.x86.exe" -ArgumentList "/install","/quiet","/norestart" -Wait
+```
+
+> 服务器**不需要显卡** —— Windows 自带 WARP 软件 D3D11 渲染器。
+
+### ★ 服务器上不需要第一跳
+
+实测：**香港机房的服务器可以被 arxlabs 直接接受**（不像大陆 IP 会被 `403 forbidden`）。
+所以服务器上的链路就是最简单的：
+
+```
+服务器  →  arxlabs SOCKS5  →  完美世界
+```
+
+不用 `chain_proxy.py`，也没有那个「1.5 请求/秒」的瓶颈。
 
 **服务器起不来（掉进恢复界面）看** [`docs/服务器恢复手册.md`](docs/服务器恢复手册.md)。
+**完整部署复盘看** [`docs/服务器部署实战记录.md`](docs/服务器部署实战记录.md)。
 
 ---
 

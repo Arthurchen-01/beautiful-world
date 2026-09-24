@@ -206,6 +206,86 @@ function Test-OS {
     }
 }
 
+# ---------------------------------------------------------------- 2b. Defender 排除
+#
+# ★★ 这是 2026-09-24 实测踩到的最硬的坑，必须最先做。
+#
+# Windows Defender 把**易语言**编译的程序判为广告软件：
+#     Adware:Win32/Flystudio        ← Flystudio 就是易语言的代号
+#     Program:Win32/Contebrew.A!ml
+#
+# 于是 PyInstaller 把「识别端」解包到临时目录的那一刻，
+# Defender 就把 `HPSocket4C.dll`（网络库）和 `OCR.dll`（54MB 模型）删掉了。
+# 后果：OCR 服务窗口能出来、按钮能找到、BM_CLICK 也返回 True，
+#      但**一点「启动」进程就崩**（内存 9MB，只加载 7 个系统 DLL，OCR/XYLib 都没加载）。
+# 现象和「缺 vcomp140.dll」几乎一样，极容易误判 —— 我在这上面绕了很久。
+#
+# 实测记录（加排除项之前，服务器上 Defender 的隔离日志）：
+#   09/24 15:07:27  _MEI...\识别端\HPSocket4C.dll
+#   09/24 15:26:27  _MEI...\识别端\OCR.dll
+#   09/24 15:30:07  _MEI...\识别端\OCR.dll
+#
+# 加完排除项后：506 立刻监听，OCR 实拍识别正常
+#   cap_00.jpg -> 113,108|249,46|240,119|48,252|187,38|
+function Add-DefenderExclusions {
+    Hdr "2b / 6  Windows Defender 排除项（★ 不做这步 OCR 必崩）"
+
+    $defender = Get-MpComputerStatus -ErrorAction SilentlyContinue
+    if (-not $defender) {
+        Warn "没装 Windows Defender（或查不到）—— 跳过"
+        Warn "  ⚠️ 但如果客户装了火绒/360/卡巴，一样要加白名单"
+        return
+    }
+
+    Say ("  实时保护: {0}" -f $(if ($defender.RealTimeProtectionEnabled) { "开启（必须加排除项）" } else { "关闭" }))
+
+    if ($DryRun) {
+        Say "  [DryRun] 会加这些排除项：" "DarkYellow"
+        foreach ($p in @($WorkDir, "$env:LOCALAPPDATA\Temp",
+                         "$env:LOCALAPPDATA\WMRoleScan", "$env:SystemRoot\Temp")) {
+            Say ("    [路径] {0}" -f $p) "DarkYellow"
+        }
+        Say  "    [进程] 图像识别POST服务.exe / 完美世界扫号工具.exe" "DarkYellow"
+        return
+    }
+
+    # 要排除的路径：exe 所在目录 + 所有可能被 PyInstaller 解包到的临时目录
+    $paths = @(
+        $WorkDir,
+        "$env:LOCALAPPDATA\Temp",
+        "$env:LOCALAPPDATA\WMRoleScan",
+        "$env:SystemRoot\Temp",
+        "$env:SystemRoot\System32\config\systemprofile\AppData\Local\Temp",
+        "$env:SystemRoot\System32\config\systemprofile\AppData\Local\WMRoleScan"
+    ) | Where-Object { $_ } | Select-Object -Unique
+
+    foreach ($p in $paths) {
+        try {
+            Add-MpPreference -ExclusionPath $p -ErrorAction Stop
+            OK ("[路径] {0}" -f $p)
+        } catch {
+            Warn ("[路径] {0} 加不上: {1}" -f $p, $_.Exception.Message)
+        }
+    }
+
+    foreach ($pr in @("图像识别POST服务.exe", "完美世界扫号工具.exe")) {
+        try {
+            Add-MpPreference -ExclusionProcess $pr -ErrorAction Stop
+            OK ("[进程] {0}" -f $pr)
+        } catch {
+            Warn ("[进程] {0} 加不上" -f $pr)
+        }
+    }
+
+    Say ""
+    Say "  当前排除项：" "Gray"
+    Say ("    路径: {0}" -f (((Get-MpPreference).ExclusionPath) -join " | ")) "Gray"
+    Say ("    进程: {0}" -f (((Get-MpPreference).ExclusionProcess) -join " | ")) "Gray"
+    Say ""
+    Warn "  ⚠️ 客户若有集中式杀软（火绒/360/卡巴），也要在那上面加白名单，"
+    Warn "     否则一样会在解包时删掉 HPSocket4C.dll / OCR.dll"
+}
+
 # ---------------------------------------------------------------- 3. 文件检查
 function Test-Inputs {
     Hdr "3 / 6  输入文件检查"
@@ -256,15 +336,28 @@ function Install-Files {
     }
     OK "工作目录就绪: $WorkDir"
 
-    $dstExe = Join-Path $WorkDir "完美世界扫号工具.exe"
-    if ($Exe -and (Test-Path $Exe)) {
-        if ((Resolve-Path $Exe).Path -ne (Resolve-Path $WorkDir).Path) {
-            Copy-Item $Exe $dstExe -Force
-            OK ("exe 已就位: {0}  ({1:N1} MB)" -f $dstExe, ((Get-Item $dstExe).Length / 1MB))
+    # ★ 源和目标可能是同一个文件（比如 exe 已经放在工作目录里了）——
+    #   直接 Copy-Item 会报 "无法使用项 X 其自身覆盖该项"。先比一下再拷。
+    function Copy-IfDifferent([string]$src, [string]$dst, [string]$label) {
+        if (-not $src -or -not (Test-Path $src)) { return }
+        try {
+            if (Test-Path $dst) {
+                $a = (Resolve-Path $src).Path
+                $b = (Resolve-Path $dst).Path
+                if ($a -eq $b) { OK ("{0} 已在位（无需拷贝）" -f $label); return }
+            }
+            Copy-Item $src $dst -Force -ErrorAction Stop
+            OK ("{0} 已就位" -f $label)
+        } catch {
+            Warn ("{0} 拷贝失败: {1}" -f $label, $_.Exception.Message)
         }
     }
-    if ($Accounts -and (Test-Path $Accounts)) { Copy-Item $Accounts "$WorkDir\账号.txt" -Force; OK "账号.txt 已就位" }
-    if ($Proxies  -and (Test-Path $Proxies))  { Copy-Item $Proxies  "$WorkDir\代理.txt" -Force; OK "代理.txt 已就位" }
+
+    Copy-IfDifferent $Exe      (Join-Path $WorkDir "完美世界扫号工具.exe") "exe"
+    Copy-IfDifferent $Accounts (Join-Path $WorkDir "账号.txt")            "账号.txt"
+    Copy-IfDifferent $Proxies  (Join-Path $WorkDir "代理.txt")            "代理.txt"
+    $dstExe = Join-Path $WorkDir "完美世界扫号工具.exe"
+    if (Test-Path $dstExe) { Say ("  exe 大小: {0:N1} MB" -f ((Get-Item $dstExe).Length / 1MB)) }
 
     # 运行包装脚本
     $runner = Join-Path $WorkDir "run_scan.cmd"
@@ -538,6 +631,7 @@ if ($Uninstall) {
 
 Test-Components
 Test-OS
+Add-DefenderExclusions
 Test-Inputs
 Install-Files
 Install-Task
