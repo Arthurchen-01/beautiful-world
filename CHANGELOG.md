@@ -3,6 +3,103 @@
 本项目所有值得记录的变更都写在这里。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.0.1] - 2026-09-24
+
+> 版本跨度：**1.0.0 → 1.0.1**
+> 代码量：**25 个文件**（+3）
+> 性质：**网络链路修复** —— 不改业务逻辑，只解决"跑不起来 / 连不上"
+
+### 上一版（1.0.0）的状态 —— 改之前是什么样
+
+| 项目 | 1.0.0 时的状态 |
+| :--- | :--- |
+| 代理池 | 代码写的是 `socks5h://user:pass@host:port` **直连**。实测**从大陆一律被拒**：`403 forbidden ip=<本机公网IP> not supported` |
+| 出口隔离 | `egress_guard.py` 能体检，但**没有任何办法让代理池真的能用** |
+| 非 80/443 端口 | 本机默认路由走 iKuuuVPN 的 TUN（fake-ip），**对所有 TCP 假握手后黑洞**。RDP / WinRM / SMB 全部连不上，且端口扫描结果全是假的 |
+| 服务器部署 | 上不去（服务器本身没起来，且即使起来也连不上 3389） |
+| 服务器状态判断 | 曾据"端口全开"判断"机房防火墙在应答" —— **这个判断是错的** |
+
+### 本次改动
+
+| 文件 | 类型 | 作用 |
+| :--- | :--- | :--- |
+| `tools/chain_proxy.py` | **新** | 代理池第一跳桥接器：把「本机→香港→日本住宅」封装成普通本地 SOCKS5，每条 sid 一个端口。**`proxy_pool.py` 零改动** |
+| `tools/tunnel.py` | **新** | 本地端口转发（RDP/WinRM/SMB/SSH），带**权威探活** |
+| `tools/server_ready.py` | **新** | 服务器就绪监视器，只认真协议回复，可 `--watch` 轮询 |
+| `docs/网络链路修复_20260924.md` | **新** | 完整排查报告：TUN 假握手、代理拒大陆 IP、服务器状态，全部带对照实验 |
+
+### Added
+
+- **代理池可用性修复**：新增第一跳桥接，解决 arxlabs 拒绝大陆来源 IP 的问题
+- **权威探活**：`probe_target()` 只认「真协议回复」——
+  443 真 TLS 握手、3389 发 RDP TPKT、445 发 SMB negotiate、22 等服务端报 banner。
+  **不信 HTTP 代理对 CONNECT 的乐观 `200`**
+- **端口转发**：`tools/tunnel.py --map 13389:<host>:3389` → `mstsc /v:127.0.0.1:13389`
+- **服务器就绪监视**：`tools/server_ready.py --watch 30`
+
+### Fixed
+
+| 症状 | 根因 |
+| :--- | :--- |
+| **日志整行凭空消失** | 控制台是 GBK，日志里的 `✗` `★` `→` 让 `print` 抛 `UnicodeEncodeError`，而 `say()` 的 `except: pass` **把它吞了**。两个新工具已加 `stdout.reconfigure(encoding="utf-8", errors="replace")` |
+| 探活把活的服务报成"不通" | 手搓的 TLS ClientHello 是残缺的，服务端不会回话。改成用 `ssl.wrap_socket()` 做**真握手** |
+| 端口扫描全"开放" | TUN 的 fake-ip 对任何 TCP 本地假握手。**拿测试保留地址 `203.0.113.7` 去连也是"全端口开放"** |
+
+### Verified
+
+**代理池链路（8 条 sid，全部可用）**：
+
+```
+体检结果：可用 8/8   唯一出口 IP 8   国内出口 0
+
+ 20001  ApJFvYFH   106.146.215.4   Osaka/KDDI         4003ms
+ 20002  QqUXUeT1   59.132.67.253   Tokyo/KDDI         2731ms
+ 20003  JFd75SCb   106.155.11.40   Tokyo/KDDI        28584ms
+ 20004  aVNVHqtB   60.141.5.68     Kitakyushu/SoftBank 27791ms
+ 20005  RPjaxjzJ   153.252.81.130  Higashiosaka/NTT   27946ms
+ 20006  hep9Jw2h   121.87.209.13   Osaka/OPTAGE       28892ms
+ 20007  QYmizM1J   60.152.178.240  Suita/SoftBank      2637ms
+ 20008  MtRs6swi   118.110.47.28   Osaka/BIGLOBE      28239ms
+```
+
+**`requests` 兼容性（证明能当普通 `socks5h://` 用）**：
+
+```
+socks5h://127.0.0.1:20001 → 106.146.215.4   2982ms
+socks5h://127.0.0.1:20007 → 60.152.178.240  2637ms
+```
+
+**目标站端到端**：
+
+```
+GET passport.wanmei.com/sso/servlet/ajax?op=mCaptchaInit&isAICap=1
+  20001  HTTP 200  7265ms  {"data":{"appId":"10003","capTicket":"c59a264c..."},"code":0}
+  20007  HTTP 200  3639ms  {"data":{"appId":"10003","capTicket":"988d7029..."},"code":0}
+```
+
+**权威探活正确性**：
+
+```
+[不通]  154.219.105.203:3389   -> [无任何回应]              ← 真话（服务器确实没起来）
+[通]    passport.wanmei.com:443 -> [TLS 握手成功] TLSv1.2   ← 真话
+[通]    198.44.166.3:3010      -> [有真回应] 0500           ← SOCKS5 问候应答
+[通]    github.com:443         -> [TLS 握手成功] TLSv1.3
+```
+
+**exe 自包含性核对**：`完美世界扫号工具.exe`（81.7 MB）内已含
+`vcomp140.dll` / `OCR.dll` / `XYLib.dll` / `HPSocket4C.dll` / `Config.ini`，
+**服务器上不需要额外装 VC++ 运行库**。
+
+### Known Issues
+
+| 问题 | 状态 |
+| :--- | :--- |
+| **服务器 `154.219.105.203` 不可达** | ⛔ **机器本身没起来**（15 个全球节点 + 本机物理直连全部超时）。需在商家控制台 Web VNC 确认实例是否已开机 |
+| 代理池延迟 2.6s ~ 28s | ⚠️ 慢 sid 可能是冷启动，未做长时间观察 |
+| 桥接器长期稳定性 | ⚠️ 未做长跑测试 |
+| 50 条全量 sid 可用率 | ⚠️ 本次只验了 8 条 |
+| Windows 10 / 8.1 / 7 未真机验证 | 代码有完整降级链，但没真机跑过 |
+
 ## [1.0.0] - 2026-09-24
 
 > 版本跨度：**首次发布**（本仓库此前为空）
