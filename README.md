@@ -5,7 +5,7 @@
 输入一批「账号 + 密码」，自动登录完美世界，查出每个账号在哪些区服有角色、
 角色多少级，输出成一张表。
 
-**版本：v1.0.0** ｜ Windows 单文件 exe ｜ 内置 OCR 识别引擎
+**版本：v1.0.1** ｜ Windows 单文件 exe ｜ 内置 OCR 识别引擎
 
 ---
 
@@ -65,6 +65,9 @@ beautiful-world/
 │   ├── make_icon.py            生成图标
 │   └── make_version.py         生成版本资源
 ├── tools/
+│   ├── chain_proxy.py          ★ 代理池第一跳桥接（解决代理商拒大陆 IP）
+│   ├── tunnel.py               ★ 本地端口转发（RDP/WinRM/SMB）+ 权威探活
+│   ├── server_ready.py         ★ 服务器就绪监视（只认真协议回复）
 │   ├── pick_text_linux.py      Linux 原生验证码求解器（研发中）
 │   └── proxy_check.py          代理批量体检
 ├── docs/                       文档
@@ -130,6 +133,31 @@ beautiful-world/
 
 **本机真实 IP 绝不暴露给目标站。**
 
+### ⚠️ 代理池必须先过「第一跳」
+
+**代理商（arxlabs）拒绝中国大陆来源 IP**，直连一律返回：
+
+```
+403 Forbidden   msg: forbidden ip=<本机公网IP> not supported
+```
+
+所以本机**不能直连代理池**，必须经一个境外第一跳转发。用 `tools/chain_proxy.py`
+把整条链封装成本地 SOCKS5，**`proxy_pool.py` 零改动**：
+
+```bat
+:: 1) 启动桥接（每条 sid 一个本地端口，自动体检并剔除国内出口）
+python tools\chain_proxy.py --proxies 代理.txt --first-hop 127.0.0.1:7890
+
+:: 2) 它写出 proxies_local.txt，直接喂主程序
+python src\wm_scan.py 账号.txt --proxy-file proxies_local.txt
+```
+
+> **别信 HTTP 代理的 `200 Connection established`** —— 那是乐观应答，
+> 目标死活都返回 200。判断连通性要用真协议握手，
+> 见 `tools/server_ready.py` / `tools/tunnel.py` 的 `probe_target()`。
+
+排查过程见 [`docs/网络链路修复_20260924.md`](docs/网络链路修复_20260924.md)。
+
 ---
 
 ## 已知限制
@@ -147,6 +175,7 @@ beautiful-world/
 
 - [使用说明](docs/使用说明.txt) —— 给新人的三步上手
 - [交付说明](docs/交付说明.md) —— 完整交付文档（含验收记录、坑位表）
+- [网络链路修复](docs/网络链路修复_20260924.md) —— ★ 代理池拒大陆 IP / TUN 假握手 / 服务器状态
 - [服务器部署报告](docs/服务器部署报告.md) —— Linux 部署尝试与结论
 - [架构](docs/TOOL_ARCH.md) · [链路](docs/CHAIN_ARCH.md) · [代理池](docs/PROXY_POOL.md)
 
