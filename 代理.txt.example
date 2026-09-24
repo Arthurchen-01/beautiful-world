@@ -1,0 +1,5 @@
+# 代理文件模板 —— 一行一条
+# 格式：host:port:用户名:密码   （支持 SOCKS5 和 HTTP）
+# 没有用户名密码就写 host:port::
+us.proxy.example:3010:user-region-JP-sid-XXXX-t-5:password
+us.proxy.example:3010:user-region-JP-sid-YYYY-t-5:password
