@@ -374,7 +374,10 @@ class App:
                 e.bind("<FocusIn>", lambda ev: self._log("  " + tip, "dim"))
             return v
 
-        self.v_par = num("并行", "parallel", 8, 4, "同时跑几个账号（有代理池可开 8~16）")
+        self.v_par = num("并行", "parallel", 8, 4,
+                         "同时跑几个账号。上限 = 你的独立代理条数\n"
+                         "（一个账号配一条 IP，账号之间不共用）\n"
+                         "同一个账号不能同时跑两次 —— 对方按账号锁会话")
         self.v_rate = num("限速", "rate", 0.8, 5, "两次请求最小间隔秒（0.8 最优）")
         self.v_retry = num("重试", "retries", 3, 3, "网络类失败换代理重跑的次数")
         self.v_usepool = tk.BooleanVar(value=bool(self.cfg.get("use_proxy_pool", True)))

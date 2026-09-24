@@ -695,7 +695,11 @@ def build_parser():
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--workers", type=int, default=3, help="账号内并发区服数（默认3）")
     ap.add_argument("--rate", type=float, default=0.8, help="两次请求最小间隔秒（实测 0.8 最优）")
-    ap.add_argument("--parallel", type=int, default=2, help="★ 同时跑几个账号（实测 2 最优；3 会触发风控失败）")
+    ap.add_argument("--parallel", type=int, default=2,
+                    help="★ 同时跑几个账号。上限 = 你的独立 IP 条数"
+                         "（一个账号配一条 IP）。没有「8 个上限」这回事 —— "
+                         "早期那个结论是同账号多会话造成的误判。"
+                         "注意：同一个账号不能并发（对方按账号锁会话）")
     ap.add_argument("--acct-delay", type=float, default=3.0, help="账号之间错开的秒数")
     ap.add_argument("--retries", type=int, default=3,
                     help="账号级重试次数：网络类失败会换一条代理重跑（默认3）")
