@@ -145,6 +145,30 @@ function Test-OS {
         OK "64 位系统"
     }
 
+    # ---- ★ 会话 / 桌面 体检（Server 上最容易踩的坑）----
+    #
+    # 这套 OCR 引擎（图像识别POST服务.exe）是**图形界面程序**：
+    # 它必须先把窗口建出来，我们再往窗口上的「启动」按钮发消息，它才监听 506。
+    #
+    # 计划任务如果用 SYSTEM 或「不管用户是否登录」，就跑在 **Session 0** ——
+    # 那里没有交互桌面。窗口消息（PostMessage / SetWindowPos）本身能用，
+    # 但「GUI 程序能不能在 Session 0 把窗口建起来」**没验证过**。
+    #
+    # 所以这里先把会话情况明确报出来，别等失败了才发现。
+    $sid  = (Get-Process -Id $PID).SessionId
+    $who  = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $isSys = ($who -match "SYSTEM$")
+    Say ("  当前会话  : Session {0}   身份 {1}" -f $sid, $who)
+
+    if ($isSys -or $sid -eq 0) {
+        Warn "正在 Session 0 / SYSTEM 下运行（计划任务通常就是这样）"
+        Warn "  OCR 引擎是 GUI 程序，要靠窗口消息点「启动」按钮。"
+        Warn "  窗口消息在 Session 0 能用，但 GUI 能不能建出窗口**没验证过**。"
+        Warn "  第 6 步冒烟测试会实际验证 —— 过不了看下面的兜底方案。"
+    } else {
+        OK ("有交互桌面（Session {0}）—— OCR 引擎能正常起" -f $sid)
+    }
+
     # Server Core 判定：没有 explorer.exe / 没有桌面组件
     $explorer = Get-Process explorer -ErrorAction SilentlyContinue
     if ($explorer) {
@@ -349,26 +373,101 @@ function Install-Task {
     } catch {
         Bad ("注册计划任务失败: {0}" -f $_.Exception.Message)
         Warn "  试试用管理员身份重开 PowerShell 再跑"
+        return
+    }
+
+    # ---- ★ 配套任务：在【用户会话】里把 OCR 服务常驻起来 ----
+    #
+    # 为什么需要它：主任务是 SYSTEM / Session 0，而 OCR 引擎是 GUI 程序，
+    # 要靠窗口消息点「启动」按钮。GUI 能不能在 Session 0 建出窗口**没验证过**。
+    #
+    # 这个配套任务在**用户登录时**跑（有桌面），用 --ocr-start 把服务拉起来。
+    # 之后主任务一连 506 就发现已经在监听，ocr_service.start() 直接返回，
+    # **根本不碰窗口** —— Session 0 的坑就绕过去了。
+    #
+    # 代价：需要有人登录过至少一次。没人登录它就只是不跑，不影响主任务。
+    $ocrTask = "$TaskName-OCR"
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    try {
+        $existingOcr = Get-ScheduledTask -TaskName $ocrTask -ErrorAction SilentlyContinue
+        if ($existingOcr) { Unregister-ScheduledTask -TaskName $ocrTask -Confirm:$false }
+
+        $oExe = Join-Path $WorkDir "完美世界扫号工具.exe"
+        $oAct = New-ScheduledTaskAction -Execute $oExe -Argument "--ocr-start" `
+                    -WorkingDirectory $WorkDir
+        $oTrg = @( (New-ScheduledTaskTrigger -AtLogOn -User $me) )
+        $oSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+                        -DontStopIfGoingOnBatteries -StartWhenAvailable `
+                        -ExecutionTimeLimit (New-TimeSpan -Hours 0) -MultipleInstances IgnoreNew
+        # 用当前用户 + Interactive：这样它跑在**有桌面的会话**里
+        $oPrincipal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel Highest
+
+        Register-ScheduledTask -TaskName $ocrTask -Action $oAct -Trigger $oTrg `
+            -Settings $oSettings -Principal $oPrincipal `
+            -Description "完美世界扫号 · OCR 服务常驻（登录时拉起，供 Session 0 的主任务使用）" | Out-Null
+        OK ("OCR 常驻任务已注册: {0}  （用户 {1} 登录时拉起）" -f $ocrTask, $me)
+        Warn "  代价：需要有人登录过一次；没人登录它就只是不跑，不影响主任务"
+        Warn ("  手工先拉一次：{0}\完美世界扫号工具.exe --ocr-start" -f $WorkDir)
+    } catch {
+        Warn ("OCR 常驻任务没注册上（{0}）—— 不影响主任务，但 Session 0 兜底就没了" -f $_.Exception.Message)
     }
 }
 
 # ---------------------------------------------------------------- 6. 冒烟测试
 function Test-Smoke {
-    Hdr "6 / 6  冒烟测试"
+    Hdr "6 / 6  冒烟测试（★ 这一步专门验 OCR 能不能起来）"
 
     if ($DryRun)   { Say "  [DryRun] 会跑一次 --selftest" "DarkYellow"; return }
-    if ($SkipSmoke) { Warn "按 -SkipSmoke 跳过冒烟测试"; return }
+    if ($SkipSmoke) { Warn "按 -SkipSmoke 跳过冒烟测试 —— 但这一步是验 OCR 的关键，建议别跳"; return }
 
     $dstExe = Join-Path $WorkDir "完美世界扫号工具.exe"
     if (-not (Test-Path $dstExe)) { Bad "exe 不在工作目录，跳过"; return }
 
-    Say "  跑 --selftest（约 30 秒）..."
+    $sid = (Get-Process -Id $PID).SessionId
+    Say ("  跑 --selftest（约 30 秒）...  当前 Session {0}" -f $sid)
     $out = & $dstExe --selftest 2>&1 | Out-String
-    $tail = ($out -split "`n" | Select-Object -Last 12) -join "`n"
+    $tail = ($out -split "`n" | Select-Object -Last 14) -join "`n"
     Say $tail
-    if ($out -match "全部通过|PASS|OK") { OK "自检通过" }
-    elseif ($out -match "失败|FAIL|错误") { Bad "自检报错，看上面的输出" }
-    else { Warn "自检输出看不懂，手工确认一下" }
+
+    $ocrOk = ($out -match "服务已在监听 506") -or ($out -match "506 已监听")
+    $allOk = ($out -match "全部通过")
+
+    if ($allOk) {
+        OK "自检全部通过"
+        if ($ocrOk) { OK "OCR 服务在本次会话里起来了 —— Session 0 这条路走得通" }
+        return
+    }
+
+    # ---- 失败：区分「OCR 起不来」和「别的问题」----
+    if (-not $ocrOk) {
+        Bad "OCR 服务没起来（506 没监听）"
+        Say ""
+        if ($sid -eq 0) {
+            Say "  ★ 这就是 Session 0 的问题：OCR 引擎是 GUI 程序，" -ForegroundColor Yellow
+            Say "    它要靠窗口消息点「启动」按钮，而 Session 0 没有交互桌面。" -ForegroundColor Yellow
+            Say ""
+            Say "  ★ 兜底方案（三选一，从省事到麻烦）：" -ForegroundColor Cyan
+            Say ""
+            Say "  方案 1（最省事）：先用远程桌面登进去，手工把 OCR 服务跑起来，" -ForegroundColor Gray
+            Say "      让它常驻。之后计划任务里 ocr_service 会发现 506 已经在监听，" -ForegroundColor Gray
+            Say "      **直接跳过「点按钮」这一步**，就不会踩 Session 0 的坑了。" -ForegroundColor Gray
+            Say ("        手工起：  {0}\完美世界扫号工具.exe --selftest" -f $WorkDir) -ForegroundColor Gray
+            Say ""
+            Say "  方案 2：把计划任务改成「只在用户登录时运行」，并保持一个远程桌面会话开着。" -ForegroundColor Gray
+            Say "      （这样任务跑在交互会话里，有桌面，OCR 能正常起）" -ForegroundColor Gray
+            Say ("        schtasks /change /tn `"{0}`" /ru 你的用户名" -f $TaskName) -ForegroundColor Gray
+            Say ""
+            Say "  方案 3：联系我，把 OCR 引擎换成不依赖窗口的启动方式。" -ForegroundColor Gray
+        } else {
+            Say "  当前有交互桌面，OCR 还起不来，先查这几样：" -ForegroundColor Yellow
+            Say "    · 识别端\vcomp140.dll 在不在（必须是 32 位，缺了会崩 0xC000041D）"
+            Say "    · 杀毒软件有没有拦「图像识别POST服务.exe」"
+            Say "    · 手工双击 识别端\图像识别POST服务.exe 看看能不能出窗口"
+        }
+        Say ""
+    } else {
+        Bad "自检没全过，看上面的输出"
+    }
 }
 
 # ---------------------------------------------------------------- 报告

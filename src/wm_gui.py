@@ -18,6 +18,59 @@ import sys
 import threading
 import time
 
+# ================================================================ ★ OCR 专用入口
+#
+# 必须放在**所有 tkinter 导入之前**：这两条路径是给服务器上的常驻任务用的，
+# 而服务器上可能压根没有图形界面库（Server Core / 精简环境）。
+# 早期版本把它们放在 main() 里，结果 import tkinter 先失败了，
+# 功能根本没走到 —— 实测报 `ModuleNotFoundError: No module named 'tkinter'`。
+#
+# 为什么要这个入口：OCR 引擎是 GUI 程序，要靠窗口消息点「启动」按钮。
+# 计划任务用 SYSTEM 跑在 Session 0（没有交互桌面）时，能不能把窗口建出来
+# 是**没验证过**的。兜底做法：在**用户会话**里用 --ocr-start 把服务常驻起来，
+# 之后 Session 0 里的扫描任务一连 506 就发现已经在监听，
+# ocr_service.start() 会直接返回、根本不碰窗口，坑就绕过去了。
+if len(sys.argv) > 1 and sys.argv[1] in ("--ocr-start", "--ocr-stop"):
+    _here0 = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
+              else os.path.dirname(os.path.abspath(__file__)))
+    sys.path.insert(0, _here0)
+    try:
+        sys.path.insert(0, getattr(sys, "_MEIPASS", _here0))
+    except Exception:
+        pass
+
+    def _ocr_task_main():
+        import app_config
+        import ocr_service
+        logp = os.path.join(app_config.app_dir(), "ocr_task.log")
+
+        def _ol(m):
+            try:
+                with io.open(logp, "a", encoding="utf-8") as f:
+                    f.write("[%s] %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), m))
+            except Exception:
+                pass
+
+        if sys.argv[1] == "--ocr-stop":
+            ocr_service.kill()
+            _ol("已停止 OCR 服务")
+            return 0
+
+        _ol("---- 开始拉起 OCR 服务 ----  argv=%r" % (sys.argv,))
+        if ocr_service.port_open():
+            _ol("506 已在监听，无需操作")
+            return 0
+        try:
+            ocr_service.start(verbose=False)
+            ok = ocr_service.port_open()
+            _ol("OK 506 已监听" if ok else "FAIL 506 没起来")
+            return 0 if ok else 1
+        except Exception as e:
+            _ol("EXC %s: %s" % (type(e).__name__, e))
+            return 1
+
+    sys.exit(_ocr_task_main())
+
 
 # ================================================================ 兼容层
 # 系统版本 / DPI / 字体 / PowerShell 的探测与降级都在 wincompat 里，
@@ -1666,6 +1719,8 @@ def main():
         return rc
     if argv and argv[0] == "--cli":
         return run_cli(argv[1:])
+    # 注：--ocr-start / --ocr-stop 在文件最顶部就处理了（那里还没 import tkinter），
+    #     不在这里 —— 见文件头的「OCR 专用入口」注释。
 
     try:
         root = tk.Tk()
